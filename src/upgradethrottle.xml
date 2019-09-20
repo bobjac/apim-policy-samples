@@ -1,0 +1,86 @@
+<!--
+    IMPORTANT:
+    - Policy elements can appear only within the <inbound>, <outbound>, <backend> section elements.
+    - To apply a policy to the incoming request (before it is forwarded to the backend service), place a corresponding policy element within the <inbound> section element.
+    - To apply a policy to the outgoing response (before it is sent back to the caller), place a corresponding policy element within the <outbound> section element.
+    - To add a policy, place the cursor at the desired insertion point and select a policy from the sidebar.
+    - To remove a policy, delete the corresponding policy statement from the policy document.
+    - Position the <base> element within a section element to inherit all policies from the corresponding section element in the enclosing scope.
+    - Remove the <base> element to prevent inheriting policies from the corresponding section element in the enclosing scope.
+    - Policies are applied in the order of their appearance, from the top down.
+    - Comments within policy elements are not supported and may disappear. Place your comments between policy elements or at a higher level scope.
+-->
+<policies>
+    <inbound>
+        <cors>
+            <allowed-origins>
+                <origin>*</origin>
+            </allowed-origins>
+            <allowed-methods>
+                <method>GET</method>
+                <method>POST</method>
+            </allowed-methods>
+        </cors>
+        <set-variable name="base64throttle" value="@(context.Request.Headers.GetValueOrDefault("devicekey"))" />
+        <set-variable name="convertedBase64" value="@(Encoding.ASCII.GetString(Convert.FromBase64String(((string)context.Variables["base64throttle"]))))" />
+        <set-variable name="parsedTier" value="@{
+            int firstIndex = ((string)context.Variables["convertedBase64"]).IndexOf("_") + 1;
+            int lastIndex = ((string)context.Variables["convertedBase64"]).LastIndexOf("_");
+            return ((string)context.Variables["convertedBase64"]).Substring(firstIndex, lastIndex - firstIndex);
+        }" />
+        <set-variable name="parsedDeviceId" value="@{
+            int firstIndex = ((string)context.Variables["convertedBase64"]).IndexOf("_") + 1;
+            return ((string)context.Variables["convertedBase64"]).Substring(0, firstIndex - 1);
+        }" />
+        <set-variable name="parsedSubscription" value="@{
+            int lastIndex = ((string)context.Variables["convertedBase64"]).LastIndexOf("_") + 1;
+            int length = ((string)context.Variables["convertedBase64"]).Length;
+            return ((string)context.Variables["convertedBase64"]).Substring(lastIndex, length - lastIndex);
+        }" />
+        <cache-lookup-value key="throttlingTier" default-value="NOTSET" variable-name="throttlingTier" />
+        <choose>
+            <when condition="@(((string)context.Variables["throttlingTier"]).Equals("NOTSET"))">
+                <set-variable name="throttlingTier" value="@(context.Request.Headers.GetValueOrDefault("throttlingTier"))" />
+                <cache-store-value key="throttlingTier" value="@((string)context.Variables["throttlingTier"])" duration="100" />
+            </when>
+        </choose>
+        <choose>
+            <when condition="@(((string)context.Variables["parsedTier"]).Equals("bigtime"))">
+                <rate-limit-by-key calls="1" renewal-period="60" counter-key="@(context.Subscription.Key)" />
+            </when>
+        </choose>
+        <choose>
+            <when condition="@(((string)context.Variables["parsedTier"]).Equals("evenbigger"))">
+                <rate-limit-by-key calls="5" renewal-period="60" counter-key="@(context.Subscription.Key)" />
+            </when>
+        </choose>
+        <base />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+        <cache-lookup-value key="throttlingTier" default-value="fail" variable-name="throttlingTier" />
+        <set-header name="RingIt" exists-action="override">
+            <value>@((string)context.Variables["throttlingTier"])</value>
+        </set-header>
+    </outbound>
+    <on-error>
+        <base />
+        <set-header name="deviceId" exists-action="override">
+            <value>@{
+               string deviceId = (string)context.Variables["parsedDeviceId"];
+               string tier = (string)context.Variables["parsedTier"];
+               if (tier.Equals("bigtime"))
+               {
+                   tier = "evenbigger";
+               }
+               string subscription = (string)context.Variables["parsedSubscription"];
+               string deviceString = string.Format("{0}_{1}_{2}", deviceId, tier, subscription);
+               byte[] deviceStringBytes = Encoding.ASCII.GetBytes(deviceString);
+               return Convert.ToBase64String(deviceStringBytes);
+            }</value>
+        </set-header>
+    </on-error>
+</policies>
